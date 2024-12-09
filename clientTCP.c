@@ -10,382 +10,138 @@
 
 #define SERVER_PORT 21
 #define IP_MAX_SIZE 16
-#define FILENAME_MAX_SIZE 200
-#define INVALID_INPUT_ERROR "Usage: ftp://[<user>:<password>@]<host>/<url-path>\n"
+#define BUFFER_SIZE 500
+#define INVALID_INPUT "Usage: ftp://[<user>:<password>@]<host>/<url-path>\n"
 
-static char filename[500];
+static char filename[BUFFER_SIZE];
 
-struct Input
-{
+// Simplified input structure
+typedef struct {
     char *user;
     char *password;
     char *host;
-    char *urlPath;
-};
+    char *url_path;
+} FTPInput;
 
-int parseUrl(char *url, char **uph, char **urlPath)
-{
-    char *token = strtok(url, "//");
-    if (strcmp(token, "ftp:") != 0)
-    {
-        printf(INVALID_INPUT_ERROR);
+// Parse URL into user, password, host, and path
+int parseUrl(char *url, FTPInput *input) {
+    char *uph, *token = strtok(url, "//");
+    if (strcmp(token, "ftp:") != 0) {
+        printf(INVALID_INPUT);
         return -1;
     }
-    *uph = strtok(NULL, "/");
-    *urlPath = strtok(NULL, "\0");
-    return 0;
-}
+    uph = strtok(NULL, "/");
+    input->url_path = strtok(NULL, "\0");
 
-void getFilename(char *urlPath, char *filename)
-{
-    char aux[1000];
-    strcpy(aux, urlPath);
-    char *token1 = strtok(aux, "/");
-    while (token1 != NULL)
-    {
-        strcpy(filename, token1);
-        token1 = strtok(NULL, "/");
-    }
-}
-
-int parseUserPasswordHost(char *uph, struct Input *input)
-{
-    if (strstr(uph, "@") != NULL)
-    {
-        if (strstr(uph, ":") == NULL)
-        {
-            printf(INVALID_INPUT_ERROR);
-            return -1;
-        }
+    if (strstr(uph, "@")) { // Includes user and password
         input->user = strtok(uph, ":");
-        if (strstr(input->user, "@") != NULL)
-        {
-            printf(INVALID_INPUT_ERROR);
-            return -1;
-        }
-        uph = strtok(NULL, "\0");
-        if (uph[0] != '@')
-        {
-            input->password = strtok(uph, "@");
-            uph = strtok(NULL, "\0");
-        }
-        else
-        {
-            printf(INVALID_INPUT_ERROR);
-            return -1;
-        }
-        input->host = strtok(uph, "\0");
-    }
-    else
-    {
+        input->password = strtok(NULL, "@");
+        input->host = strtok(NULL, "\0");
+    } else { // Anonymous login
         input->user = "anonymous";
         input->password = "password";
-        input->host = strtok(uph, "\0");
+        input->host = uph;
     }
     return 0;
 }
 
-int parseInput(int argc, char **argv, struct Input *input)
-{
-    if (argc < 2)
-    {
-        printf("Error: Not enough arguments.\n");
-        return -1;
-    }
-
-    // Parse input URL
-    char *uph;
-    if (parseUrl(argv[1], &uph, &input->urlPath) < 0)
-    {
-        return -1;
-    }
-
-    // Get filename from url path
-    getFilename(input->urlPath, filename);
-
-    // Parse user, password, and host
-    return parseUserPasswordHost(uph, input);
+// Extract filename from URL path
+void extractFilename(const char *url_path, char *filename) {
+    const char *last_slash = strrchr(url_path, '/');
+    strcpy(filename, last_slash ? last_slash + 1 : url_path);
 }
 
-int writeToSocket(int fd, const char *cmd, const char *info)
-{
-    // Write command to socket
-    if (write(fd, cmd, strlen(cmd)) != strlen(cmd))
-    {
-        printf("Error writing command to socket\n");
+// Create and connect socket to server
+int createSocket(const char *ip, int port) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("Socket creation failed");
         return -1;
     }
 
-    // Write info to socket
-    if (write(fd, info, strlen(info)) != strlen(info))
-    {
-        printf("Error writing info to socket\n");
-        return -1;
-    }
-
-    // Write newline to socket
-    if (write(fd, "\n", strlen("\n")) != strlen("\n"))
-    {
-        printf("Error writing newline to socket\n");
-        return -1;
-    }
-
-    return 0;
-}
-
-int readFromSocket(char *result, FILE *sock)
-{
-    // Read the first three characters of the response
-    int first = fgetc(sock);
-    int second = fgetc(sock);
-    int third = fgetc(sock);
-    if (first == EOF || second == EOF || third == EOF)
-    {
-        return -1;
-    }
-
-    // Read the space character after the response code
-    int space = fgetc(sock);
-    if (space == EOF)
-    {
-        return -1;
-    }
-
-    // Read the rest of the response
-    if (space != ' ')
-    {
-        do
-        {
-            printf("%s\n", fgets(result, FILENAME_MAX_SIZE, sock));
-            if (result == NULL)
-            {
-                return -1;
-            }
-        } while (result[3] != ' ');
-    }
-    else
-    {
-        printf("%s\n", fgets(result, FILENAME_MAX_SIZE, sock));
-    }
-
-    // Convert response code to integer and return
-    int zero = '0';
-    return (first - zero) * 100 + (second - zero) * 10 + (third - zero);
-}
-
-int createSocket(const char *ip, int port)
-{
-    int sockfd;
-    struct sockaddr_in server_addr;
-
-    // Set up server address
-    memset((char *)&server_addr, 0, sizeof(server_addr));
+    struct sockaddr_in server_addr = {0};
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = inet_addr(ip);
     server_addr.sin_port = htons(port);
 
-    // Create TCP socket
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
-    {
-        perror("socket()");
+    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+        perror("Socket connection failed");
+        close(sockfd);
         return -1;
     }
-
-    // Connect to server
-    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
-    {
-        perror("connect()");
-        return -1;
-    }
-
     return sockfd;
 }
 
-int main(int argc, char **argv)
-{
-    // Parse input
-    struct Input input;
-    int parse_input_result = parseInput(argc, argv, &input);
-    if (parse_input_result < 0)
-    {
-        fprintf(stderr, "Error parsing input\n");
-        exit(-1);
+// Send command to socket
+int sendCommand(int socket_fd, const char *cmd, const char *param) {
+    char buffer[BUFFER_SIZE];
+    snprintf(buffer, sizeof(buffer), "%s %s\r\n", cmd, param);
+    return write(socket_fd, buffer, strlen(buffer)) == (ssize_t)strlen(buffer) ? 0 : -1;
+}
+
+// Read response from socket
+int readResponse(FILE *socket_stream, char *buffer, size_t buffer_size) {
+    if (!fgets(buffer, buffer_size, socket_stream)) return -1;
+    printf("%s", buffer);
+    return atoi(buffer); // Parse response code
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "Error: Not enough arguments.\n");
+        return -1;
     }
 
-    // Get IP address of host
-    struct hostent *h;
-    h = gethostbyname(input.host);
-    if (h == NULL)
-    {
-        herror("gethostbyname()");
-        exit(-1);
+    FTPInput input;
+    if (parseUrl(argv[1], &input) < 0) return -1;
+    extractFilename(input.url_path, filename);
+
+    struct hostent *host = gethostbyname(input.host);
+    if (!host) {
+        herror("DNS resolution failed");
+        return -1;
     }
     char ip[IP_MAX_SIZE];
-    strcpy(ip, inet_ntoa(*((struct in_addr *)h->h_addr)));
-    printf("IP Address : %s\n", ip);
+    strcpy(ip, inet_ntoa(*(struct in_addr *)host->h_addr));
 
-    // Create control connection
-    int control_connection_fd = createSocket(ip, SERVER_PORT);
-    if (control_connection_fd < 0)
-    {
-        fprintf(stderr, "Error creating control connection\n");
-        return -1;
-    }
-    FILE *control_connection_file = fdopen(control_connection_fd, "r+");
+    int control_fd = createSocket(ip, SERVER_PORT);
+    if (control_fd < 0) return -1;
+    FILE *control_stream = fdopen(control_fd, "r+");
 
-    // Read initial response from control connection
-    char result[500];
-    int response_code = readFromSocket(result, control_connection_file);
-    if (response_code < 0)
-    {
-        fprintf(stderr, "Error reading from control connection\n");
-        return -1;
-    }
-    if (response_code != 220)
-    {
-        fprintf(stderr, "Bad response from control connection\n");
-        return -1;
-    }
+    char buffer[BUFFER_SIZE];
+    if (readResponse(control_stream, buffer, sizeof(buffer)) != 220) return -1;
 
-    // Send user command to control connection
-    int write_result = writeToSocket(control_connection_fd, "user ", input.user);
-    if (write_result != 0)
-    {
-        fprintf(stderr, "Error writing to control connection\n");
-        return -1;
-    }
+    if (sendCommand(control_fd, "USER", input.user) < 0 || 
+        readResponse(control_stream, buffer, sizeof(buffer)) != 331 ||
+        sendCommand(control_fd, "PASS", input.password) < 0 ||
+        readResponse(control_stream, buffer, sizeof(buffer)) != 230) return -1;
 
-    // Read response to user command from control connection
-    response_code = readFromSocket(result, control_connection_file);
-    if (response_code < 0)
-    {
-        fprintf(stderr, "Error reading from control connection\n");
-        return -1;
-    }
-    if (response_code != 331)
-    {
-        fprintf(stderr, "Bad response from control connection\n");
-        return -1;
-    }
+    if (sendCommand(control_fd, "PASV", "") < 0 ||
+        readResponse(control_stream, buffer, sizeof(buffer)) != 227) return -1;
 
-    // Send pass command to control connection
-    write_result = writeToSocket(control_connection_fd, "pass ", input.password);
-    if (write_result != 0)
-    {
-        fprintf(stderr, "Error writing to control connection\n");
-        return -1;
-    }
+    int a, b, c, d, p1, p2;
+    sscanf(strchr(buffer, '('), "(%d,%d,%d,%d,%d,%d)", &a, &b, &c, &d, &p1, &p2);
+    int data_port = p1 * 256 + p2;
 
-    // Read response to pass command from control connection
-    response_code = readFromSocket(result, control_connection_file);
-    if (response_code < 0)
-    {
-        fprintf(stderr, "Error reading from control connection\n");
-        return -1;
-    }
-    if (response_code != 230)
-    {
-        fprintf(stderr, "Bad response from control connection\n");
-        return -1;
-    }
+    int data_fd = createSocket(ip, data_port);
+    if (data_fd < 0) return -1;
+    FILE *data_stream = fdopen(data_fd, "r");
 
-    // Send pasv command to control connection
-    write_result = writeToSocket(control_connection_fd, "pasv ", "");
-    if (write_result != 0)
-    {
-        fprintf(stderr, "Error writing to control connection\n");
-        return -1;
+    if (sendCommand(control_fd, "RETR", input.url_path) < 0 ||
+        readResponse(control_stream, buffer, sizeof(buffer)) != 150) return -1;
+
+    FILE *file = fopen(filename, "wb");
+    while (!feof(data_stream)) {
+        size_t bytes = fread(buffer, 1, sizeof(buffer), data_stream);
+        fwrite(buffer, 1, bytes, file);
     }
+    fclose(file);
+    fclose(data_stream);
+    close(data_fd);
 
-    // Read response to pasv command from control connection
-    response_code = readFromSocket(result, control_connection_file);
-    if (response_code < 0)
-    {
-        fprintf(stderr, "Error reading from control connection\n");
-        return -1;
-    }
-    if (response_code != 227)
-    {
-        fprintf(stderr, "Bad response from control connection\n");
-        return -1;
-    }
+    if (readResponse(control_stream, buffer, sizeof(buffer)) != 226) return -1;
 
-    // Parse port number from pasv response
-    int a, b, c, d, e, f;
-    sscanf(result, "Entering Passive Mode (%d,%d,%d,%d,%d,%d).", &a, &b, &c, &d, &e, &f);
-    int real_port = e * 256 + f;
-
-    // Create data connection
-    int data_connection_fd = createSocket(ip, real_port);
-    if (data_connection_fd < 0)
-    {
-        fprintf(stderr, "Error creating data connection\n");
-        return -1;
-    }
-    FILE *data_connection_file = fdopen(data_connection_fd, "r+");
-
-    // Send retr command to control connection
-    write_result = writeToSocket(control_connection_fd, "retr ", input.urlPath);
-    if (write_result != 0)
-    {
-        fprintf(stderr, "Error writing to control connection\n");
-        return -1;
-    }
-
-    // Read response to retr command from control connection
-    response_code = readFromSocket(result, control_connection_file);
-    if (response_code < 0)
-    {
-        fprintf(stderr, "Error reading from control connection\n");
-        return -1;
-    }
-    if (response_code != 150)
-    {
-        fprintf(stderr, "Bad response from control connection\n");
-        return -1;
-    }
-
-    // Open file to write data to
-    FILE *myFile = fopen(filename, "w");
-
-    // Read data from data connection and write to file
-    int size;
-    while (true)
-    {
-        unsigned char final_result[300];
-        bool end;
-        size = fread(final_result, 1, 300, data_connection_file);
-        if (size < 0)
-            return -1;
-        if (size < 300)
-            end = true;
-        fwrite(final_result, 1, size, myFile);
-        if (end)
-            break;
-    }
-
-    // Close file and connections
-    fclose(myFile);
-    fclose(data_connection_file);
-    close(data_connection_fd);
-
-    // Read response from control connection after closing data connection
-    response_code = readFromSocket(result, control_connection_file);
-    if (response_code < 0)
-    {
-        fprintf(stderr, "Error reading from control connection\n");
-        return -1;
-    }
-    if (response_code != 226)
-    {
-        fprintf(stderr, "Bad response from control connection\n");
-        return -1;
-    }
-
-    // Close control connection
-    fclose(control_connection_file);
-    close(control_connection_fd);
-
+    fclose(control_stream);
+    close(control_fd);
     return 0;
 }
