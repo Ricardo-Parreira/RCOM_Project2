@@ -7,9 +7,6 @@
 #include "clientTCP.c"
 #include "getip.c"
 
-#include "clientTCP.c"
-#include "getip.c"
-
 #define BUFFER_SIZE 1024
 
 // Function to extract the file name from a path
