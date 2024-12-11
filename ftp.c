@@ -1,232 +1,172 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <arpa/inet.h>
 #include <unistd.h>
-#include <errno.h>
-#include <libgen.h>
+#include <arpa/inet.h>
+#include "clientTCP.c"
+#include "getip.c"
 
-extern int connectToServer_TCP(const char *hostname, int port);
-extern char *resolveHostnameToIP(const char *hostname);
-
-#define FTP_PORT 21
 #define BUFFER_SIZE 1024
-#define MAX_CREDENTIAL_SIZE 512
 
-void connectToServer(const char *hostname, int *controlSock);
-void sendCommand(int sock, const char *cmd);
-void receiveResponse(int sock, char *response, size_t size);
-void authenticate(int controlSock);
-void parsePASVResponse(const char *response, char *dataIP, int *dataPort);
-void downloadFile(int controlSock, const char *filename);
+// Function to extract the file name from a path
+const char *get_filename(const char *path) {
+    const char *filename = strrchr(path, '/'); // Find the last '/'
+    return (filename != NULL) ? filename + 1 : path; // Return the file name or the entire path if no '/'
+}
 
-int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <hostname> <filename>\n", argv[0]);
-        exit(EXIT_FAILURE);
+// Function to parse the FTP URL
+int parse_url(const char *url, char *user, char *password, char *host, char *path) {
+    if (sscanf(url, "ftp://%99[^:]:%99[^@]@%99[^/]/%199[^\n]", user, password, host, path) == 4) {
+        return 0; // User, password, host, and path provided
+    } else if (sscanf(url, "ftp://%99[^@]@%99[^/]/%199[^\n]", user, host, path) == 3) {
+        strcpy(password, "anonymous"); // Default password
+        return 0;
+    } else if (sscanf(url, "ftp://%99[^/]/%199[^\n]", host, path) == 2) {
+        strcpy(user, "anonymous");
+        strcpy(password, "anonymous");
+        return 0;
+    }
+    return -1; // Invalid URL
+}
+
+// Function to send an FTP command and receive a response
+int ftp_command(int sockfd, const char *command, char *response, size_t response_size) {
+    char buffer[BUFFER_SIZE];
+    snprintf(buffer, BUFFER_SIZE, "%s\r\n", command);
+
+    if (write(sockfd, buffer, strlen(buffer)) < 0) {
+        perror("Error sending command");
+        return -1;
     }
 
-    const char *hostname = argv[1];
-    const char *filename = argv[2];
-
-    char *ip = resolveHostnameToIP(hostname);
-    if (!ip) {
-        fprintf(stderr, "Error resolving hostname %s.\n", hostname);
-        exit(EXIT_FAILURE);
+    memset(response, 0, response_size);
+    if (read(sockfd, response, response_size - 1) <= 0) {
+        perror("Error reading response");
+        return -1;
     }
-    printf("Resolved IP address: %s\n", ip);
-
-    int controlSock;
-    connectToServer(hostname, &controlSock);
-
-    char response[BUFFER_SIZE];
-    receiveResponse(controlSock, response, sizeof(response));
-    printf("Server response: %s\n", response);
-
-    authenticate(controlSock);
-    downloadFile(controlSock, filename);
-
-    close(controlSock);
-    printf("Connection closed.\n");
-
+    response[response_size - 1] = '\0'; // Ensure null-termination
+    printf("Server Response: %s", response);
     return 0;
 }
 
-void connectToServer(const char *hostname, int *controlSock) {
-    char *ip = resolveHostnameToIP(hostname);
-    if (!ip) {
-        fprintf(stderr, "Error resolving hostname %s.\n", hostname);
-        exit(EXIT_FAILURE);
-    }
-    printf("Resolved IP address: %s\n", ip);
-
-    *controlSock = connectToServer_TCP(ip, FTP_PORT);
-    if (*controlSock < 0) {
-        fprintf(stderr, "Error: Could not connect to server %s on port %d\n", hostname, FTP_PORT);
-        exit(EXIT_FAILURE);
-    }
-    printf("Connected to server %s on port %d\n", hostname, FTP_PORT);
-}
-
-void sendCommand(int sock, const char *cmd) {
-    if (send(sock, cmd, strlen(cmd), 0) < 0) {
-        perror("Error sending command");
-        exit(EXIT_FAILURE);
-    }
-    printf("Command sent: %s", cmd);
-}
-
-void receiveResponse(int sock, char *response, size_t size) {
-    memset(response, 0, size);
-    if (recv(sock, response, size - 1, 0) < 0) {
-        perror("Error receiving response");
-        exit(EXIT_FAILURE);
-    }
-    printf("Response received: %s", response);
-}
-
-void authenticate(int controlSock) {
-    char username[MAX_CREDENTIAL_SIZE];
-    char password[MAX_CREDENTIAL_SIZE];
-    char command[BUFFER_SIZE];
+// Function to enable passive mode
+int setup_passive_mode(int sockfd, char *data_ip, int *data_port) {
     char response[BUFFER_SIZE];
-
-    // Solicitar o username
-    printf("Enter username: ");
-    if (!fgets(username, sizeof(username), stdin)) {
-        fprintf(stderr, "Error reading username.\n");
-        exit(EXIT_FAILURE);
+    if (ftp_command(sockfd, "PASV", response, BUFFER_SIZE) < 0) {
+        return -1;
     }
-    username[strcspn(username, "\n")] = '\0'; // Remover newline
 
-    // Enviar comando USER
-    snprintf(command, sizeof(command), "USER %s\r\n", username);
-    sendCommand(controlSock, command);
-
-    // Ignorar múltiplas respostas informacionais `220`
-    do {
-        receiveResponse(controlSock, response, sizeof(response));
-        if (strncmp(response, "220", 3) == 0) {
-            printf("Info: Additional 220 response ignored.\n");
-        }
-    } while (strncmp(response, "220", 3) == 0);
-
-    // Verificar se o servidor pede senha ou realiza login
-    if (strncmp(response, "331", 3) == 0) {
-        // Solicitar a senha
-        printf("Enter password: ");
-        if (!fgets(password, sizeof(password), stdin)) {
-            fprintf(stderr, "Error reading password.\n");
-            exit(EXIT_FAILURE);
-        }
-        password[strcspn(password, "\n")] = '\0'; // Remover newline
-
-        // Enviar comando PASS
-        snprintf(command, sizeof(command), "PASS %s\r\n", password);
-        sendCommand(controlSock, command);
-        receiveResponse(controlSock, response, sizeof(response));
-
-        if (strncmp(response, "230", 3) != 0) {
-            fprintf(stderr, "Login failed: %s\n", response);
-            exit(EXIT_FAILURE);
-        }
-        printf("Login successful.\n");
-
-    } else if (strncmp(response, "230", 3) == 0) {
-        // Login direto, sem necessidade de senha
-        printf("Login successful (no password required).\n");
-
-    } else {
-        // Resposta inesperada
-        fprintf(stderr, "Unexpected response after USER: %s\n", response);
-        exit(EXIT_FAILURE);
+    char *start = strchr(response, '(');
+    char *end = strchr(response, ')');
+    if (!start || !end || start >= end) {
+        fprintf(stderr, "Invalid PASV response format\n");
+        return -1;
     }
+
+    int h1, h2, h3, h4, p1, p2;
+    if (sscanf(start, "(%d,%d,%d,%d,%d,%d)", &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
+        fprintf(stderr, "Error parsing PASV response\n");
+        return -1;
+    }
+
+    snprintf(data_ip, BUFFER_SIZE, "%d.%d.%d.%d", h1, h2, h3, h4);
+    *data_port = p1 * 256 + p2;
+    return 0;
 }
 
-
-void parsePASVResponse(const char *response, char *dataIP, int *dataPort) {
-    int ip1, ip2, ip3, ip4, p1, p2;
-    if (sscanf(response, "227 Entering Passive Mode (%d,%d,%d,%d,%d,%d)",
-               &ip1, &ip2, &ip3, &ip4, &p1, &p2) != 6) {
-        fprintf(stderr, "Error parsing PASV response: %s\n", response);
-        exit(EXIT_FAILURE);
-    }
-    snprintf(dataIP, BUFFER_SIZE, "%d.%d.%d.%d", ip1, ip2, ip3, ip4);
-    *dataPort = p1 * 256 + p2;
-}
-
-void downloadFile(int controlSock, const char *filename) {
-    char command[BUFFER_SIZE];
-    char response[BUFFER_SIZE];
-    char dataIP[BUFFER_SIZE];
-    int dataPort;
-
-    // Send PASV command
-    snprintf(command, sizeof(command), "PASV\r\n");
-    sendCommand(controlSock, command);
-    receiveResponse(controlSock, response, sizeof(response));
-
-    if (strncmp(response, "227", 3) != 0) {
-        fprintf(stderr, "Error: Failed to enter passive mode. Server response: %s\n", response);
-        exit(EXIT_FAILURE);
-    }
-    parsePASVResponse(response, dataIP, &dataPort);
-    printf("Passive mode: IP = %s, Port = %d\n", dataIP, dataPort);
-
-    // Connect to the data socket
-    int dataSock = connectToServer_TCP(dataIP, dataPort);
-    if (dataSock < 0) {
-        fprintf(stderr, "Error: Could not connect to data socket at %s:%d\n", dataIP, dataPort);
-        exit(EXIT_FAILURE);
+// Function to download a file
+int download_file(int data_sockfd, const char *path) {
+    const char *filename = get_filename(path); // Extract file name
+    if (strlen(filename) > 255) {
+        fprintf(stderr, "Filename too long\n");
+        return -1;
     }
 
-    // Extract the base filename (strip directories)
-    const char *baseFilename = basename((char *)filename);
-
-    // Open file for writing
-    FILE *file = fopen(baseFilename, "wb");
+    FILE *file = fopen(filename, "wb");
     if (!file) {
-        fprintf(stderr, "Error opening file '%s' for writing: %s\n", baseFilename, strerror(errno));
-        close(dataSock);
-        return;
+        perror("Error opening file");
+        return -1;
     }
 
-    // Send RETR command
-    snprintf(command, sizeof(command), "RETR %s\r\n", filename);
-    sendCommand(controlSock, command);
-    receiveResponse(controlSock, response, sizeof(response));
-
-    if (strncmp(response, "150", 3) != 0) {
-        fprintf(stderr, "Error: File transfer failed. Server response: %s\n", response);
-        fclose(file);
-        close(dataSock);
-        return;
-    }
-
-    // Transfer data from socket to file
     char buffer[BUFFER_SIZE];
-    ssize_t bytesRead;
-    while ((bytesRead = recv(dataSock, buffer, sizeof(buffer), 0)) > 0) {
-        if (fwrite(buffer, 1, bytesRead, file) != (size_t)bytesRead) {
-            fprintf(stderr, "Error writing to file '%s': %s\n", baseFilename, strerror(errno));
-            fclose(file);
-            close(dataSock);
-            return;
-        }
+    ssize_t bytes_read;
+    while ((bytes_read = read(data_sockfd, buffer, BUFFER_SIZE)) > 0) {
+        fwrite(buffer, 1, bytes_read, file);
     }
 
-    if (bytesRead < 0) {
-        fprintf(stderr, "Error receiving data: %s\n", strerror(errno));
+    if (bytes_read < 0) {
+        perror("Error reading from data socket");
+        fclose(file);
+        return -1;
     }
 
     fclose(file);
-    close(dataSock);
+    printf("File downloaded successfully: %s\n", filename);
+    return 0;
+}
 
-    // Check final server response
-    receiveResponse(controlSock, response, sizeof(response));
-    if (strncmp(response, "226", 3) != 0) {
-        fprintf(stderr, "Error: File transfer not completed. Server response: %s\n", response);
-    } else {
-        printf("File transfer complete. File saved as: %s\n", baseFilename);
+// Main function
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <ftp-url>\n", argv[0]);
+        return 1;
     }
+
+    const char *url = argv[1];
+    char user[100] = "", password[100] = "", host[100], path[200], ip[100];
+    int control_sockfd = -1, data_sockfd = -1, data_port;
+
+    // Parse the FTP URL
+    if (parse_url(url, user, password, host, path) < 0) {
+        fprintf(stderr, "Invalid FTP URL\n");
+        return 1;
+    }
+
+    printf("User: %s, Password: %s, Host: %s, Path: %s\n", user, password, host, path);
+
+    // Resolve the hostname to an IP address
+    if (get_ip(host, ip) < 0) {
+        fprintf(stderr, "Failed to resolve hostname: %s\n", host);
+        return 1;
+    }
+    printf("Resolved IP: %s\n", ip);
+
+    // Create a control connection
+    if ((control_sockfd = create_connection(ip, 21)) < 0) {
+        return 1;
+    }
+
+    char response[BUFFER_SIZE];
+    read(control_sockfd, response, BUFFER_SIZE);
+    printf("Connected to FTP server: %s\n", response);
+
+    // Login to the FTP server
+    char command[BUFFER_SIZE];
+    snprintf(command, BUFFER_SIZE, "USER %s", user);
+    if (ftp_command(control_sockfd, command, response, BUFFER_SIZE) < 0) goto cleanup;
+
+    snprintf(command, BUFFER_SIZE, "PASS %s", password);
+    if (ftp_command(control_sockfd, command, response, BUFFER_SIZE) < 0) goto cleanup;
+
+    // Enter passive mode
+    char data_ip[100];
+    if (setup_passive_mode(control_sockfd, data_ip, &data_port) < 0) goto cleanup;
+
+    printf("Passive mode - IP: %s, Port: %d\n", data_ip, data_port);
+
+    // Create a data connection
+    if ((data_sockfd = create_connection(data_ip, data_port)) < 0) goto cleanup;
+
+    // Request file transfer
+    snprintf(command, BUFFER_SIZE, "RETR %s", path);
+    if (ftp_command(control_sockfd, command, response, BUFFER_SIZE) < 0) goto cleanup;
+
+    // Download the file
+    if (download_file(data_sockfd, path) < 0) goto cleanup;
+
+cleanup:
+    if (data_sockfd >= 0) close(data_sockfd);
+    if (control_sockfd >= 0) close(control_sockfd);
+
+    return 0;
 }
