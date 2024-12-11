@@ -1,24 +1,23 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 
-char *resolveHostnameToIP(const char *hostname) {
-    struct hostent *host;
-    static char ip[INET_ADDRSTRLEN];
+// Function to resolve hostname to IP
+int get_ip(const char *hostname, char *ip) {
+    struct hostent *he;
+    struct in_addr **addr_list;
 
-    // Resolver hostname para endereço IP
-    host = gethostbyname(hostname);
-    if (!host) {
-        fprintf(stderr, "Error resolving hostname: %s\n", hstrerror(h_errno));
-        return NULL;
+    if ((he = gethostbyname(hostname)) == NULL) {
+        herror("gethostbyname");
+        return -1;
     }
 
-    // Converter o endereço IP para string
-    if (!inet_ntop(AF_INET, host->h_addr_list[0], ip, INET_ADDRSTRLEN)) {
-        perror("Error converting address to string");
-        return NULL;
+    addr_list = (struct in_addr **)he->h_addr_list;
+    if (addr_list[0] != NULL) {
+        strcpy(ip, inet_ntoa(*addr_list[0]));
+        return 0;
     }
-
-    return ip;
+    return -1;
 }
